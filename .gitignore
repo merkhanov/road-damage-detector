@@ -1,0 +1,10 @@
+cat > .gitignore << EOF
+venv/
+runs/
+*.pt
+bus.jpg
+test_road.jpg
+__pycache__/
+*.pyc
+.env
+EOF
