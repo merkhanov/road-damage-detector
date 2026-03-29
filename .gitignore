@@ -6,3 +6,8 @@ test_road.jpg
 __pycache__/
 *.pyc
 .env
+backend/static/
+data/Road-damage-detection-2/
+node_modules/
+.next/
+*.log
