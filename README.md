@@ -201,7 +201,3 @@ road-damage-detector/
 ├── .env.example         # Шаблон переменных окружения
 └── .gitignore
 ```
-
-## Лицензия
-
-MIT
