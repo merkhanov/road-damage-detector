@@ -41,12 +41,41 @@ SEVERITY_RU = {
     "critical": "Критическая",
 }
 
+NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+
 
 def _api_headers() -> dict:
     headers = {}
     if API_SECRET_KEY:
         headers["X-API-Key"] = API_SECRET_KEY
     return headers
+
+
+async def _geocode_address(address: str) -> tuple[float, float, str] | None:
+    """Превращает адрес в координаты через Nominatim (OpenStreetMap)."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                NOMINATIM_URL,
+                params={
+                    "q": address,
+                    "format": "json",
+                    "limit": 1,
+                    "addressdetails": 1,
+                },
+                headers={"User-Agent": "RoadDamageBot/1.0"},
+            )
+            response.raise_for_status()
+            results = response.json()
+    except Exception:
+        logger.exception("Geocoding error")
+        return None
+
+    if not results:
+        return None
+
+    hit = results[0]
+    return float(hit["lat"]), float(hit["lon"]), hit.get("display_name", address)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -101,7 +130,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Повреждение обнаружено!\n"
             f"Серьёзность: {severity_text}\n"
             f"Уверенность: {confidence_pct}%\n\n"
-            f"Отправьте геолокацию, чтобы сохранить отчёт."
+            f"Укажите местоположение:\n"
+            f"- Напишите адрес (например: ул. Абая 10, Алматы)\n"
+            f"- Или отправьте геолокацию кнопкой ниже\n"
+            f"- Или /skip чтобы сохранить без адреса"
         )
     else:
         text = (
@@ -120,11 +152,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WAITING_LOCATION
 
 
-async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получаем геолокацию и сохраняем отчёт."""
-    location = update.message.location
+async def _save_report(update: Update, context: ContextTypes.DEFAULT_TYPE, lat: float, lng: float, address: str = ""):
+    """Сохраняет отчёт через API."""
     data = context.user_data.get("last_result")
-
     if not data:
         await update.message.reply_text(
             "Нет данных анализа. Отправьте фото заново.",
@@ -133,8 +163,8 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return WAITING_PHOTO
 
     report = {
-        "latitude": location.latitude,
-        "longitude": location.longitude,
+        "latitude": lat,
+        "longitude": lng,
         "severity": data["severity"],
         "confidence": data["confidence"],
         "image_path": data["annotated_image_url"],
@@ -156,14 +186,45 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return WAITING_PHOTO
 
+    location_info = address if address else f"{lat:.4f}, {lng:.4f}"
     await update.message.reply_text(
-        "Отчёт сохранён! Спасибо за вклад.\n"
+        f"Отчёт сохранён!\n"
+        f"Адрес: {location_info}\n"
         "Отправьте ещё фото или /cancel для выхода.",
         reply_markup=ReplyKeyboardRemove(),
     )
 
     context.user_data.pop("last_result", None)
     return WAITING_PHOTO
+
+
+async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Получаем геолокацию (кнопка на телефоне) и сохраняем отчёт."""
+    location = update.message.location
+    return await _save_report(update, context, location.latitude, location.longitude)
+
+
+async def handle_text_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Получаем адрес текстом, геокодим через Nominatim."""
+    text = update.message.text.strip()
+
+    await update.message.reply_text("Ищу адрес...")
+
+    result = await _geocode_address(text)
+    if not result:
+        await update.message.reply_text(
+            "Адрес не найден. Попробуйте написать точнее:\n"
+            "Например: ул. Абая 10, Алматы"
+        )
+        return WAITING_LOCATION
+
+    lat, lng, display_name = result
+    return await _save_report(update, context, lat, lng, display_name)
+
+
+async def handle_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Сохраняет отчёт без координат (0, 0)."""
+    return await _save_report(update, context, 0.0, 0.0, "Не указан")
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -192,6 +253,8 @@ def main():
             WAITING_LOCATION: [
                 MessageHandler(filters.LOCATION, handle_location),
                 MessageHandler(filters.PHOTO, handle_photo),
+                CommandHandler("skip", handle_skip),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_location),
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
